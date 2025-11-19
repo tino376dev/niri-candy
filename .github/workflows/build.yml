@@ -1,0 +1,131 @@
+name: Build awww Binaries
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # changed from read to allow tag + release
+  actions: read
+  checks: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create awww builder image
+        run: |
+          docker build -t awww-build -f awww/Containerfile awww
+
+      - name: Extract awww binaries from image
+        run: |
+            cid=$(docker create awww-build)
+            mkdir -p awww_artifacts
+            docker cp $cid:/awww/target/release/swww awww_artifacts/awww || echo "awww binary not found"
+            docker cp $cid:/awww/target/release/swww-daemon awww_artifacts/awww-daemon || echo "awww-daemon binary not found"
+            docker rm $cid
+            ls -l awww_artifacts
+
+      - name: Create wallpaper builder image
+        run: |
+          docker build -t wallpaper-build -f wallpaper/Containerfile wallpaper
+
+      - name: Extract wallpaper JXL images
+        run: |
+          cid=$(docker create wallpaper-build)
+          mkdir -p wallpaper_artifacts
+          docker cp $cid:/home/linuxbrew/defaults/default/light.png wallpaper_artifacts/light.png || echo "light.png not found"
+          docker cp $cid:/home/linuxbrew/defaults/default/light-blur.png wallpaper_artifacts/light-blur.png || echo "light-blur.png not found"
+          docker cp $cid:/home/linuxbrew/defaults/default/dark.png wallpaper_artifacts/dark.png || echo "dark.png not found"
+          docker cp $cid:/home/linuxbrew/defaults/default/dark-blur.png wallpaper_artifacts/dark-blur.png || echo "dark-blur.png not found"
+          docker rm $cid
+          ls -l wallpaper_artifacts
+
+      - name: Upload awww binaries
+        uses: actions/upload-artifact@v4
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        with:
+          name: awww-binaries-linux
+          path: |
+            awww_artifacts/awww
+            awww_artifacts/awww-daemon
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload wallpaper images
+        uses: actions/upload-artifact@v4
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        with:
+          name: wallpaper-jxl-linux
+          path: |
+            wallpaper_artifacts/light.png
+            wallpaper_artifacts/light-blur.png
+            wallpaper_artifacts/dark.png
+            wallpaper_artifacts/dark-blur.png
+          if-no-files-found: error
+          retention-days: 1
+
+      # Release steps only on push to main
+      - name: Set date-based release tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          TAG=$(date -u +"%Y.%m.%d")
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+          echo "Release tag: $TAG"
+
+      - name: Delete existing release/tag for today (idempotent)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="$RELEASE_TAG"
+          # Find existing release ID
+          RID=$(gh api repos/${{ github.repository }}/releases --jq ".[] | select(.tag_name==\"$TAG\") | .id" || true)
+          if [ -n "$RID" ]; then
+            echo "Deleting existing release $RID for tag $TAG"
+            gh api repos/${{ github.repository }}/releases/$RID -X DELETE
+          fi
+          # Delete tag locally/remote if exists
+          git fetch --tags
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag -d "$TAG"
+            git push origin ":refs/tags/$TAG"
+          fi
+
+      - name: Create date tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git tag "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+
+      - name: Publish release with assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Rename assets to stable names (optional)
+          cp awww_artifacts/awww awww-linux-amd64
+          cp awww_artifacts/awww-daemon awww-daemon-linux-amd64
+          cp wallpaper_artifacts/light.png light.png
+          cp wallpaper_artifacts/light-blur.png light-blur.png
+          cp wallpaper_artifacts/dark.png dark.png
+          cp wallpaper_artifacts/dark-blur.png dark-blur.png
+          gh release create "$RELEASE_TAG" \
+            --title "Daily build $RELEASE_TAG" \
+            --notes "Automated daily build for $RELEASE_TAG" \
+            awww-linux-amd64 \
+            awww-daemon-linux-amd64 \
+            light.png \
+            dark.png \
+            light-blur.png \
+            dark-blur.png
+          echo "Release created at: https://github.com/${{ github.repository }}/releases/tag/$RELEASE_TAG"

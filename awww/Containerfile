@@ -1,0 +1,18 @@
+FROM docker.io/library/rust:trixie
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libwayland-dev \
+    wayland-protocols \
+    libxkbcommon-dev \
+    liblz4-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Fetch latest release tag and download tarball without using jq (avoids parse errors on control chars)
+RUN set -e; \
+    TAG=$(curl -fsSL https://codeberg.org/api/v1/repos/LGFae/awww/releases/latest | grep -Po '"tag_name"\s*:\s*"\K[^" ]*' | head -n1); \
+    echo "Latest awww tag: ${TAG}"; \
+    curl -fsSL "https://codeberg.org/LGFae/awww/archive/${TAG}.tar.gz" | tar xz; \
+    cd awww; \
+    cargo build --release
