@@ -57,6 +57,7 @@ jobs:
           mkdir -p "$DEST"
           docker buildx build \
             --platform "${BUILD_PLATFORMS}" \
+            --file "${COMPONENT_PATH}/Containerfile" \
             --target export \
             --output "type=local,dest=${DEST}" \
             "${COMPONENT_PATH}"
