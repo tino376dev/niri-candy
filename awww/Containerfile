@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # export binaries
 FROM scratch AS export
 # Copy artifacts
-COPY --from=builder /work/release/swww /awww
-COPY --from=builder /work/release/swww-daemon /awww-daemon
+COPY --chmod=0755 --from=builder /work/release/swww /awww
+COPY --chmod=0755 --from=builder /work/release/swww-daemon /awww-daemon
 
 # podman buildx build --target export --output type=local,dest=./binaries .
