@@ -48,6 +48,12 @@ jobs:
           echo "Contents of $DEST:"
           ls -l "$DEST"
 
+          TARFILE="${DEST}.tar.gz"
+          echo "Creating tarball: $TARFILE"
+          tar -C "$DEST" -czf "$TARFILE" .
+          echo "Tarball created:"
+          ls -l "$TARFILE"
+
           # Export PLATFORM_TAG for subsequent steps
           echo "PLATFORM_TAG=${PLATFORM_TAG}" >> "$GITHUB_ENV"
 
@@ -56,7 +62,7 @@ jobs:
         with:
           # Artifact name includes component + platform tag (slashes already replaced)
           name: ${{ matrix.component.name }}-${{ env.PLATFORM_TAG }}
-          path: ${{ matrix.component.name }}-${{ env.PLATFORM_TAG }}/*
+          path: ${{ matrix.component.name }}-${{ env.PLATFORM_TAG }}.tar.gz
           if-no-files-found: error
           retention-days: 3
 
@@ -95,12 +101,18 @@ jobs:
           echo "Contents of ${{ matrix.component.name }}:"
           ls -l "${{ matrix.component.name }}"
 
+          TARFILE="${{ matrix.component.name }}.tar.gz"
+          echo "Creating tarball: $TARFILE"
+          tar -C "{{ matrix.component.name }}" -czf "$TARFILE" .
+          echo "Tarball created:"
+          ls -l "$TARFILE"
+
       - name: Upload per-arch artifact
         uses: actions/upload-artifact@v4
         with:
           # Artifact name includes component + platform tag (slashes already replaced)
           name: ${{ matrix.component.name }}
-          path: ${{ matrix.component.name }}/*
+          path: ${{ matrix.component.name }}.tar.gz
           if-no-files-found: error
           retention-days: 3
 
@@ -121,52 +133,27 @@ jobs:
           pattern: "*"
           path: dist
 
-      - name: Move latest tag to current commit
+      - name: Gather tarballs & checksums
         run: |
           set -euxo pipefail
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git tag -f latest
-          git push origin -f latest
-
-      - name: Package tarballs
-        run: |
-          set -euxo pipefail
-          mkdir -p packages work
-
+          mkdir -p packages
           echo "Downloaded artifact directories:"
           ls -1 dist || true
 
-          binary_count=0
-          static_count=0
+          find dist -type f -name '*.tar.gz' -exec cp -v {} packages/ \;
 
-          for dir in dist/*; do
-            [ -d "$dir" ] || continue
-            base="$(basename "$dir")"
+          echo "Collected tarballs:"
+          ls -l packages || true
 
-            if [[ "$base" == *-linux-* ]]; then
-              # Binary component with platform suffix
-              component="${base%%-*}"                # part before first hyphen
-              platform_tag="${base#${component}-}"   # remainder (linux-amd64, linux-arm64, etc.)
-              stage="work/${base}"
-              mkdir -p "$stage"
-              cp -a "$dir"/. "$stage"/
-              tarball="packages/${component}-${platform_tag}.tar.gz"
-              tar -C "$stage" -czf "$tarball" .
-              echo "Created binary tarball: $tarball"
-              binary_count=$((binary_count+1))
-            else
-              # Static component (no platform suffix in directory name)
-              component="$base"
-              stage="work/${base}"
-              mkdir -p "$stage"
-              cp -a "$dir"/. "$stage"/
-              tarball="packages/${component}.tar.gz"
-              tar -C "$stage" -czf "$tarball" .
-              echo "Created static tarball: $tarball"
-              static_count=$((static_count+1))
-            fi
-          done
+          if [ -z "$(find packages -name '*.tar.gz' -type f | head -n1)" ]; then
+            echo "No tarballs found to release." >&2
+            find dist -maxdepth 3 -type f -print || true
+            exit 1
+          fi
+
+          (cd packages && sha256sum *.tar.gz > SHA256SUMS.txt)
+          echo "Checksums:"
+          cat packages/SHA256SUMS.txt
 
           echo "Summary: $binary_count binary tarballs, $static_count static tarballs."
 
@@ -189,6 +176,14 @@ jobs:
             exit 1
           fi
 
+      - name: Move latest tag to current commit
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git tag -f latest
+          git push origin -f latest
+
       - name: Publish release (recreate)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -198,7 +193,7 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" -y
           fi
-          NOTES="Automated build for '${TAG}' (commit $GITHUB_SHA). Includes per-platform binary tarballs and static component tarballs."
+          NOTES="Automated build for '${TAG}' (commit $GITHUB_SHA). Tarballs were produced inside the component build stages."
           gh release create "$TAG" \
             --title "Latest build (${TAG})" \
             --notes "$NOTES" \
