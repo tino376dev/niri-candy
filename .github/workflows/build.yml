@@ -1,9 +1,8 @@
-name: Build & Release Artifacts
+name: Build & Release Artifacts (multi-arch binaries + static assets)
 
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,34 +10,16 @@ permissions:
   actions: read
   checks: read
 
-env:
-  # Adjust if you want multi-arch later
-  BUILD_PLATFORMS: linux/amd64
-
 jobs:
-  build:
-    name: Build artifact matrix
+  build_binaries:
+    name: Build binary components (platform matrix)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        platform: [linux/amd64, linux/arm64]
         component:
           - name: awww
-            path: awww
-            artifact_dir: awww_artifacts
-            # files expected from export stage
-            outputs: |
-              awww
-              awww-daemon
-          - name: wallpaper
-            path: wallpaper
-            artifact_dir: wallpaper_artifacts
-            outputs: |
-              light.png
-              dark.png
-              light-blur.png
-              dark-blur.png
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,34 +29,86 @@ jobs:
         with:
           install: true
 
-      - name: Build
+      - name: Build component for platform
         run: |
           set -euxo pipefail
-          COMPONENT_PATH="${{ matrix.component.path }}"
-          PLATFORM_TAG=$(echo "${BUILD_PLATFORMS}" | tr '/,' '-')
-          DEST="${{ matrix.component.artifact_dir }}/$PLATFORM_TAG"
+          PLATFORM_TAG=$(echo "${{ matrix.platform }}" | tr '/' '-')
+          DEST="${{ matrix.component.name }}-${PLATFORM_TAG}"
           mkdir -p "$DEST"
+
+          CONTAINERFILE="${{ matrix.component.name }}/Containerfile"
+          echo "Using build file: $CONTAINERFILE"
           docker buildx build \
-            --platform "${BUILD_PLATFORMS}" \
-            --file "${COMPONENT_PATH}/Containerfile" \
+            --platform "${{ matrix.platform }}" \
+            --file "$CONTAINERFILE" \
             --target export \
             --output "type=local,dest=${DEST}" \
-            "${COMPONENT_PATH}"
+            "${{ matrix.component.name }}"
+
           echo "Contents of $DEST:"
           ls -l "$DEST"
 
-      - name: Upload
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+          # Export PLATFORM_TAG for subsequent steps
+          echo "PLATFORM_TAG=${PLATFORM_TAG}" >> "$GITHUB_ENV"
+
+      - name: Upload per-arch artifact
         uses: actions/upload-artifact@v4
         with:
+          # Artifact name includes component + platform tag (slashes already replaced)
+          name: ${{ matrix.component.name }}-${{ env.PLATFORM_TAG }}
+          path: ${{ matrix.component.name }}-${{ env.PLATFORM_TAG }}/*
+          if-no-files-found: error
+          retention-days: 3
+
+  build_static:
+    name: Build static components (platform matrix)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [linux/amd64]
+        component:
+          - name: wallpaper
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+
+      - name: Build component for platform
+        run: |
+          set -euxo pipefail
+          mkdir -p "${{ matrix.component.name }}"
+
+          CONTAINERFILE="${{ matrix.component.name }}/Containerfile"
+          echo "Using build file: $CONTAINERFILE"
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --file "$CONTAINERFILE" \
+            --target export \
+            --output "type=local,dest=${{ matrix.component.name }}" \
+            "${{ matrix.component.name }}"
+
+          echo "Contents of ${{ matrix.component.name }}:"
+          ls -l "${{ matrix.component.name }}"
+
+      - name: Upload per-arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact name includes component + platform tag (slashes already replaced)
           name: ${{ matrix.component.name }}
-          path: ${{ matrix.component.artifact_dir }}/*
+          path: ${{ matrix.component.name }}/*
           if-no-files-found: error
           retention-days: 3
 
   release:
-    name: Create release
-    needs: [build]
+    name: Create latest release
+    needs:
+      - build_binaries
+      - build_static
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -90,20 +123,86 @@ jobs:
 
       - name: Move latest tag to current commit
         run: |
+          set -euxo pipefail
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git tag -f latest
           git push origin -f latest
 
-      - name: Publish release
+      - name: Package tarballs
+        run: |
+          set -euxo pipefail
+          mkdir -p packages work
+
+          echo "Downloaded artifact directories:"
+          ls -1 dist || true
+
+          binary_count=0
+          static_count=0
+
+          for dir in dist/*; do
+            [ -d "$dir" ] || continue
+            base="$(basename "$dir")"
+
+            if [[ "$base" == *-linux-* ]]; then
+              # Binary component with platform suffix
+              component="${base%%-*}"                # part before first hyphen
+              platform_tag="${base#${component}-}"   # remainder (linux-amd64, linux-arm64, etc.)
+              stage="work/${base}"
+              mkdir -p "$stage"
+              cp -a "$dir"/. "$stage"/
+              tarball="packages/${component}-${platform_tag}.tar.gz"
+              tar -C "$stage" -czf "$tarball" .
+              echo "Created binary tarball: $tarball"
+              binary_count=$((binary_count+1))
+            else
+              # Static component (no platform suffix in directory name)
+              component="$base"
+              stage="work/${base}"
+              mkdir -p "$stage"
+              cp -a "$dir"/. "$stage"/
+              tarball="packages/${component}.tar.gz"
+              tar -C "$stage" -czf "$tarball" .
+              echo "Created static tarball: $tarball"
+              static_count=$((static_count+1))
+            fi
+          done
+
+          echo "Summary: $binary_count binary tarballs, $static_count static tarballs."
+
+          if [ "$binary_count" -eq 0 ]; then
+            echo "WARNING: No binary tarballs produced (expected at least one *-linux-* directory)." >&2
+          fi
+          if [ "$static_count" -eq 0 ]; then
+            echo "WARNING: No static tarballs produced (expected at least one directory without -linux- in its name)." >&2
+          fi
+
+          echo "Tarballs produced:"
+          ls -l packages
+
+          (cd packages && sha256sum *.tar.gz > SHA256SUMS.txt)
+          echo "Checksums:"
+          cat packages/SHA256SUMS.txt
+
+          if [ -z "$(find packages -name '*.tar.gz' -type f | head -n1)" ]; then
+            echo "No tarballs produced." >&2
+            exit 1
+          fi
+
+      - name: Publish release (recreate)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euxo pipefail
           TAG=latest
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" -y
+          fi
+          NOTES="Automated build for '${TAG}' (commit $GITHUB_SHA). Includes per-platform binary tarballs and static component tarballs."
           gh release create "$TAG" \
-            --title "Daily build $TAG" \
-            --notes "Automated daily build for $TAG" \
-            flat/*
+            --title "Latest build (${TAG})" \
+            --notes "$NOTES" \
+            packages/*.tar.gz packages/SHA256SUMS.txt
 
       - name: Output release URL
         run: |
