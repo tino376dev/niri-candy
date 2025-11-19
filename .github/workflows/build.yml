@@ -103,7 +103,7 @@ jobs:
 
           TARFILE="${{ matrix.component.name }}.tar.gz"
           echo "Creating tarball: $TARFILE"
-          tar -C "{{ matrix.component.name }}" -czf "$TARFILE" .
+          tar -C "${{ matrix.component.name }}" -czf "$TARFILE" .
           echo "Tarball created:"
           ls -l "$TARFILE"
 
@@ -154,15 +154,6 @@ jobs:
           (cd packages && sha256sum *.tar.gz > SHA256SUMS.txt)
           echo "Checksums:"
           cat packages/SHA256SUMS.txt
-
-          echo "Summary: $binary_count binary tarballs, $static_count static tarballs."
-
-          if [ "$binary_count" -eq 0 ]; then
-            echo "WARNING: No binary tarballs produced (expected at least one *-linux-* directory)." >&2
-          fi
-          if [ "$static_count" -eq 0 ]; then
-            echo "WARNING: No static tarballs produced (expected at least one directory without -linux- in its name)." >&2
-          fi
 
           echo "Tarballs produced:"
           ls -l packages
