@@ -1,18 +1,31 @@
-FROM docker.io/library/rust:trixie
+FROM docker.io/library/rust:slim AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,target=/var/cache/apt apt-get update \
+  && apt-get install -y --no-install-recommends \
+  pkg-config \
+  libwayland-dev \
+  wayland-protocols \
+  liblz4-dev \
+  jq \
+  curl \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+# fetch latest tarball and extract
+RUN curl -fsSL https://codeberg.org/api/v1/repos/LGFae/awww/releases/latest \
+  | jq -r '.tarball_url' \
+  | xargs curl -fsSL \
+  | tar -xz --strip-components=1
+# build release binaries
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+  --mount=type=cache,target=/usr/local/cargo/git \
+  --mount=type=cache,target=/work/target \
+  cargo build --release --locked \
+  && mv target/release .
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    libwayland-dev \
-    wayland-protocols \
-    libxkbcommon-dev \
-    liblz4-dev \
- && rm -rf /var/lib/apt/lists/*
+# export binaries
+FROM scratch AS export
+# Copy artifacts
+COPY --from=builder /work/release/swww /awww
+COPY --from=builder /work/release/swww-daemon /awww-daemon
 
-# Fetch latest release tag and download tarball without using jq (avoids parse errors on control chars)
-RUN set -e; \
-    TAG=$(curl -fsSL https://codeberg.org/api/v1/repos/LGFae/awww/releases/latest | grep -Po '"tag_name"\s*:\s*"\K[^" ]*' | head -n1); \
-    echo "Latest awww tag: ${TAG}"; \
-    curl -fsSL "https://codeberg.org/LGFae/awww/archive/${TAG}.tar.gz" | tar xz; \
-    cd awww; \
-    cargo build --release
+# podman buildx build --target export --output type=local,dest=./binaries .

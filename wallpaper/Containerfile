@@ -1,12 +1,21 @@
-FROM docker.io/homebrew/brew:latest
+FROM --platform=$BUILDPLATFORM alpine:latest AS builder
+RUN --mount=type=cache,target=/var/cache/apk apk add --no-cache libjxl-tools imagemagick curl jq
+WORKDIR /work
+# fetch latest tarball and extract
+RUN curl -fsSL "https://api.github.com/repos/fedoradesign/backgrounds/releases/latest" \
+  | jq -r '.tarball_url' \
+  | xargs curl -fsSL \
+  | tar -xz --strip-components=1
+# normalize filenames and render pngs
+RUN light=$(echo default/*day.jxl) \
+  && dark=$(echo default/*night.jxl) \
+  && djxl $light light.png \
+  && djxl $dark dark.png \
+  && magick light.png -blur 0x25 light-blur.png \
+  && magick dark.png -blur 0x25 dark-blur.png
 
-RUN brew install git imagemagick
+# export wallpapers
+FROM scratch AS export
+COPY --from=builder /work/*.png /
 
-RUN git clone --depth 1 --branch $(curl -s https://api.github.com/repos/fedoradesign/backgrounds/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') https://github.com/fedoradesign/backgrounds.git defaults \
-&& cd defaults/default \
-&& mv *day.jxl light.jxl \
-&& mv *night.jxl dark.jxl \
-&& magick light.jxl light.png \
-&& magick light.jxl -blur 0x25 light-blur.png \
-&& magick dark.jxl dark.png \
-&& magick dark.jxl -blur 0x25 dark-blur.png
+# podman buildx build --target export --output type=local,dest=./wallpapers .
